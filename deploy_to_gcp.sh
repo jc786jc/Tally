@@ -5,7 +5,7 @@
 set -e
 
 # Configuration - Update these values
-PROJECT_ID="your-gcp-project-id"  # Replace with your GCP project ID
+PROJECT_ID="datarecsv2"  # Replace with your GCP project ID
 VM_NAME="tally-vm"
 ZONE="us-central1-a"
 MACHINE_TYPE="e2-small"  # Changed from e2-medium for 50% cost reduction
