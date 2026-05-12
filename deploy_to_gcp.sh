@@ -105,12 +105,6 @@ gcloud compute firewall-rules create allow-tally-http \
     --target-tags tally-server \
     --description="Allow HTTP traffic to Tally web server"
 
-gcloud compute firewall-rules create allow-airflow \
-    --allow tcp:8080 \
-    --source-ranges 0.0.0.0/0 \
-    --target-tags tally-server \
-    --description="Allow HTTP traffic to Airflow web UI"
-
 echo ""
 echo "=== GCP Deployment Complete! ==="
 echo ""
@@ -121,16 +115,12 @@ echo "- External IP: $VM_IP"
 echo ""
 echo "Access URLs:"
 echo "- Tally Application: http://$VM_IP"
-echo "- Airflow Dashboard: http://$VM_IP:8080"
-echo "  Username: admin"
-echo "  Password: tally123"
 echo ""
 echo "Service Account Key: ~/tally-key.json (on your local machine)"
 echo ""
 echo "Next steps:"
-echo "1. Update BigQuery project references in DAG files"
-echo "2. Configure email settings in Airflow"
-echo "3. Test the application"
-echo "4. Set up monitoring if needed"
+echo "1. Update BigQuery project references in any runtime scripts"
+echo "2. Test the application"
+echo "3. Set up monitoring if needed"
 echo ""
 echo "To connect to VM: gcloud compute ssh $VM_NAME --zone=$ZONE"

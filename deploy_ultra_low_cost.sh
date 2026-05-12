@@ -108,12 +108,6 @@ gcloud compute firewall-rules create allow-tally-http \
     --target-tags tally-server \
     --description="Allow HTTP traffic to Tally web server"
 
-gcloud compute firewall-rules create allow-airflow \
-    --allow tcp:8080 \
-    --source-ranges 0.0.0.0/0 \
-    --target-tags tally-server \
-    --description="Allow HTTP traffic to Airflow web UI"
-
 echo ""
 echo "=== ULTRA-LOW COST Deployment Complete! ==="
 echo ""
@@ -131,9 +125,6 @@ echo "   - Use for testing only, not production!"
 echo ""
 echo "Access URLs:"
 echo "- Tally Application: http://$VM_IP"
-echo "- Airflow Dashboard: http://$VM_IP:8080"
-echo "  Username: admin"
-echo "  Password: tally123"
 echo ""
 echo "To connect: gcloud compute ssh $VM_NAME --zone=$ZONE"
 echo ""

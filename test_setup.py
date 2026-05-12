@@ -36,39 +36,21 @@ def test_bigquery_connectivity():
         print(f"❌ BigQuery test failed: {e}")
         return False
 
-def test_airflow_setup():
-    """Test Airflow installation and DAG loading"""
-    print("🔍 Testing Airflow setup...")
+def test_dqm_ttcm_execution_scripts():
+    """Verify runtime execution scripts for DQM and TTCM are present."""
+    print("🔍 Checking DQM/TTCM execution scripts...")
 
-    try:
-        import airflow
-        from airflow.models import DagBag
+    missing = []
+    for script in ['run_dqm.py', 'run_ttcm.py']:
+        if not os.path.exists(script):
+            missing.append(script)
 
-        print(f"✅ Airflow version: {airflow.__version__}")
-
-        # Test DAG loading
-        dagbag = DagBag(dag_folder='/opt/tally/airflow/dags', include_examples=False)
-
-        if dagbag.dags:
-            print(f"✅ Loaded DAGs: {list(dagbag.dags.keys())}")
-
-            # Check for our DAGs
-            expected_dags = ['dqm_monthly_execution', 'ttcm_monthly_execution']
-            found_dags = [d for d in expected_dags if d in dagbag.dags]
-
-            if len(found_dags) == len(expected_dags):
-                print("✅ All expected DAGs loaded successfully")
-                return True
-            else:
-                print(f"⚠️ Missing DAGs: {set(expected_dags) - set(found_dags)}")
-                return False
-        else:
-            print("❌ No DAGs loaded")
-            return False
-
-    except Exception as e:
-        print(f"❌ Airflow test failed: {e}")
+    if missing:
+        print(f"❌ Missing execution scripts: {', '.join(missing)}")
         return False
+
+    print("✅ Execution scripts are present")
+    return True
 
 def test_web_services():
     """Test that web services are running"""
@@ -84,13 +66,6 @@ def test_web_services():
         else:
             print(f"⚠️ Tally web server returned status {response.status_code}")
 
-        # Test Airflow webserver
-        response = requests.get('http://localhost:8080', timeout=5)
-        if response.status_code == 200:
-            print("✅ Airflow web server responding")
-        else:
-            print(f"⚠️ Airflow web server returned status {response.status_code}")
-
         return True
 
     except requests.exceptions.RequestException as e:
@@ -104,7 +79,7 @@ def main():
 
     tests = [
         ("BigQuery Connectivity", test_bigquery_connectivity),
-        ("Airflow Setup", test_airflow_setup),
+        ("DQM/TTCM Script Availability", test_dqm_ttcm_execution_scripts),
         ("Web Services", test_web_services),
     ]
 
@@ -126,18 +101,17 @@ def main():
 
     print("\n" + "=" * 50)
     if all_passed:
-        print("🎉 All tests passed! Your VM setup is ready for production.")
+        print("🎉 All tests passed! Your VM setup is ready.")
         print("\nNext steps:")
         print("1. Access Tally app at http://your-vm-ip")
-        print("2. Access Airflow UI at http://your-vm-ip:8080")
-        print("3. Monitor monthly executions starting next month")
+        print("2. Run DQM and TTCM execution scripts manually")
+        print("3. Monitor logs and BigQuery results")
     else:
         print("⚠️ Some tests failed. Please review the errors above and fix issues before going to production.")
         print("\nCommon fixes:")
         print("- Check GOOGLE_APPLICATION_CREDENTIALS environment variable")
         print("- Verify BigQuery permissions")
-        print("- Check Airflow configuration")
-        print("- Ensure services are running: sudo systemctl status airflow-webserver tally-server")
+        print("- Ensure Tally is running: sudo systemctl status tally-server")
 
     return 0 if all_passed else 1
 

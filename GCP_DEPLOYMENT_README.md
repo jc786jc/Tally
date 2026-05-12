@@ -79,9 +79,6 @@ VM Details:
 
 Access URLs:
 - Tally Application: http://34.123.45.67
-- Airflow Dashboard: http://34.123.45.67:8080
-  Username: admin
-  Password: tally123
 ```
 
 ## Manual Testing
@@ -97,38 +94,25 @@ source venv/bin/activate
 python test_setup.py
 ```
 
-### Test DAGs Manually
+### Run DQM/TTCM Manually
 ```bash
-# In Airflow UI, unpause and trigger DAGs
-# Or via command line:
-airflow dags unpause dqm_monthly_execution
-airflow dags trigger dqm_monthly_execution
+# Run DQM execution manually
+python run_dqm.py
+
+# Run TTCM execution manually
+python run_ttcm.py
 ```
 
 ### Monitor Logs
 ```bash
-# View Airflow logs
-tail -f /opt/tally/airflow/logs/dag_processor_manager/dag_processor_manager.log
-
 # View application logs
 sudo journalctl -u tally-server -f
 ```
 
 ## Configuration Updates
 
-### Update BigQuery Project in DAGs
-Edit the DAG files to use your project ID:
-```python
-PROJECT  = 'your-gcp-project-id'  # Update this in both DAGs
-```
-
-### Configure Email Alerts
-Update `/opt/tally/airflow/airflow.cfg` on the VM:
-```ini
-[smtp]
-smtp_user = your-gmail@gmail.com
-smtp_password = your-gmail-app-password
-```
+### Configure Credentials
+If you need BigQuery access, ensure the VM has valid credentials or the `GOOGLE_APPLICATION_CREDENTIALS` environment variable is set.
 
 ### Custom Domain (Optional)
 If you want a custom domain:
@@ -154,7 +138,7 @@ When done testing:
 gcloud compute instances delete tally-vm --zone=us-central1-a
 
 # Delete firewall rules
-gcloud compute firewall-rules delete allow-tally-http allow-airflow
+gcloud compute firewall-rules delete allow-tally-http
 
 # Delete service account (optional)
 gcloud iam service-accounts delete tally-service-account@your-project.iam.gserviceaccount.com
@@ -177,13 +161,13 @@ gcloud compute instances get-serial-port-output tally-vm --zone=us-central1-a
 gcloud projects get-iam-policy your-project --flatten="bindings[].members" --filter="bindings.members:serviceAccount:tally-service-account@your-project.iam.gserviceaccount.com"
 ```
 
-### Airflow Issues
+### Troubleshooting
 ```bash
-# Restart Airflow services
-sudo systemctl restart airflow-webserver airflow-scheduler
+# Check Tally service status
+sudo systemctl status tally-server
 
-# Check Airflow logs
-sudo journalctl -u airflow-scheduler -f
+# View Tally application logs
+sudo journalctl -u tally-server -f
 ```
 
 ## Next Steps for HSBC Deployment
@@ -196,4 +180,4 @@ Once tested in GCP, adapt for HSBC:
 4. **Update firewall rules** per HSBC policies
 5. **Add monitoring** per HSBC standards
 
-The core application and DAGs will work the same way!
+The core application will work the same way without Airflow.
