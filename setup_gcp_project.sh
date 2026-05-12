@@ -23,20 +23,15 @@ fi
 
 echo "✅ GCP authentication confirmed"
 
-# Get project ID
-read -p "Enter your GCP project ID: " PROJECT_ID
-
-if [ -z "$PROJECT_ID" ]; then
-    echo "❌ Project ID cannot be empty"
-    exit 1
-fi
+# Project ID
+PROJECT_ID="datarecsv2"
 
 # Set project
 echo "Setting project to: $PROJECT_ID"
-gcloud config set project $PROJECT_ID
+gcloud config set project "$PROJECT_ID"
 
 # Verify project exists
-if ! gcloud projects describe $PROJECT_ID > /dev/null 2>&1; then
+if ! gcloud projects describe "$PROJECT_ID" > /dev/null 2>&1; then
     echo "❌ Project $PROJECT_ID not found or you don't have access"
     exit 1
 fi
@@ -51,13 +46,13 @@ echo "✅ APIs enabled"
 
 # Create BigQuery datasets
 echo "Creating BigQuery datasets..."
-bq mk --project_id=$PROJECT_ID dqm_data
-bq mk --project_id=$PROJECT_ID ttcm_data
+bq mk --project_id="$PROJECT_ID" dqm_data
+bq mk --project_id="$PROJECT_ID" ttcm_data
 echo "✅ BigQuery datasets created"
 
 # Update configuration file
 echo "Updating configuration file..."
-sed -i.bak "s/your-gcp-project-id/$PROJECT_ID/g" gcp_config.env
+sed -i.bak "s/your-gcp-project-id/$PROJECT_ID/g" gcp_config.env && rm -f gcp_config.env.bak
 echo "✅ Configuration updated"
 
 # Generate test data (optional)
@@ -76,7 +71,6 @@ echo "Project: $PROJECT_ID"
 echo "Datasets: dqm_data, ttcm_data"
 echo ""
 echo "Next steps:"
-echo "1. Update gcp_config.env with your email settings"
-echo "2. Run: ./deploy_to_gcp.sh"
+echo "1. Run: ./deploy_to_gcp.sh"
 echo ""
 echo "Configuration file: gcp_config.env"

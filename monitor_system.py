@@ -1,7 +1,7 @@
 ﻿#!/usr/bin/env python3
 """
 Monitoring script for Tally DQM/TTCM system
-Run periodically to check system health and send alerts if needed
+Run periodically to check system health
 """
 
 import sys
@@ -62,16 +62,6 @@ def check_bigquery_access():
         return False
 
 
-def send_alert(subject, message):
-    """Send alert email (placeholder - integrate with your email system)"""
-    print(f"🚨 ALERT: {subject}")
-    print(message)
-    print("-" * 50)
-
-    # TODO: Integrate with HSBC email system
-    # Example: send_email(to='team@hsbc.com', subject=subject, body=message)
-
-
 def main():
     """Run health checks"""
     print(f"🔍 Tally System Health Check - {datetime.now()}")
@@ -83,7 +73,6 @@ def main():
         ("BigQuery Access", check_bigquery_access),
     ]
 
-    alerts = []
     all_healthy = True
 
     for check_name, check_func in checks:
@@ -94,23 +83,17 @@ def main():
 
             if not result:
                 all_healthy = False
-                alerts.append(f"{check_name} check failed")
 
         except Exception as e:
             print(f"  {check_name}: ❌ ERROR - {e}")
             all_healthy = False
-            alerts.append(f"{check_name} error: {e}")
 
     print("\n" + "=" * 60)
 
     if all_healthy:
         print("🎉 All systems healthy!")
     else:
-        alert_message = "\n".join(alerts)
-        send_alert(
-            "Tally System Health Alert",
-            f"The following issues were detected:\n\n{alert_message}\n\nPlease check the system logs and resolve issues."
-        )
+        print("❌ One or more checks failed. Please check the system logs.")
 
     return 0 if all_healthy else 1
 
