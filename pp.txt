@@ -1,0 +1,503 @@
+import { useState } from "react";
+
+const TABLES = [
+  {
+    name: "SB_PRE_PROCESSING_MASTER_TBL",
+    module: "DFD 9",
+    desc: "One row per pre-processing run. Stores configuration (thresholds, target variable, sample weight, box cox) and links to job output. Load Type: Insert.",
+    tag: null,
+    cols: [
+      { name:"pre_processing_id", type:"VARCHAR(36)", desc:"Unique identifier for each pre-processing execution", req:"Yes", source:"System", logic:"Auto-generated UUID when user clicks Run Pre Processing", key:"PK" },
+      { name:"run_id", type:"VARCHAR(36)", desc:"Which Stratobot run this pre-processing belongs to", req:"Yes", source:"SB_RUN_MASTER", logic:"Passed from session context when user is in Pre-processing module", key:"FK" },
+      { name:"strategy_id", type:"VARCHAR(36)", desc:"Denormalised for query performance", req:"Yes", source:"SB_STRATEGY_MASTER", logic:"Copied from run_id → SB_RUN_MASTER.strategy_id. Avoids join on every query", key:"FK" },
+      { name:"data_id", type:"VARCHAR(36)", desc:"Which validated dataset this pre-processing ran against", req:"Yes", source:"SB_DATA_MASTER_TBL", logic:"Active data_id for this run at time of pre-processing execution", key:"FK" },
+      { name:"pre_processing_type", type:"VARCHAR(50)", desc:"Type of pre-processing operation executed", req:"Yes", source:"System", logic:"Set based on which section user ran. Values: Normal (Remove Redundant Variables) / Box_Cox (Box Cox Transformation) / Variable_Identification", key:"" },
+      { name:"flag", type:"VARCHAR(50)", desc:"Category flag for this pre-processing run — from Monitoring Table", req:"Yes", source:"System", logic:"Seen on screen as BEHAVIOUR. Indicates the nature of the pre-processing run. Pending Deepu clarification on all valid values", key:"" },
+      { name:"cov_threshold", type:"DECIMAL", desc:"COV rejection threshold — variables with COV below this are rejected", req:"No", source:"Frontend", logic:"User enters on Remove Redundant Variables screen. Default 0.1. Null if pre_processing_type is not Normal", key:"" },
+      { name:"missing_pct_threshold", type:"DECIMAL", desc:"Missing % rejection threshold — variables above this % missing are rejected", req:"No", source:"Frontend", logic:"User enters on Remove Redundant Variables screen. Default 10. Null if pre_processing_type is not Normal", key:"" },
+      { name:"categories_max_threshold", type:"INT", desc:"Maximum number of categories allowed — variables above this are rejected", req:"No", source:"Frontend", logic:"User enters on Remove Redundant Variables screen. Default 15. Null if pre_processing_type is not Normal", key:"" },
+      { name:"categories_min_threshold", type:"INT", desc:"Minimum number of categories required — variables below this are rejected", req:"No", source:"Frontend", logic:"User enters on Remove Redundant Variables screen. Default 2. Null if pre_processing_type is not Normal", key:"" },
+      { name:"iv_threshold", type:"DECIMAL", desc:"IV rejection threshold — variables with IV below this are rejected", req:"No", source:"Frontend", logic:"User enters on Remove Redundant Variables screen. Default 0.05. Null if pre_processing_type is not Normal", key:"" },
+      { name:"lambda_value", type:"DECIMAL", desc:"Lambda value for Box Cox transformation", req:"No", source:"Frontend", logic:"User enters manually or selects Auto. Null if pre_processing_type is not Box_Cox", key:"" },
+      { name:"lambda_method", type:"VARCHAR(10)", desc:"How lambda was determined — Input or Auto", req:"No", source:"Frontend", logic:"Set to Input if user entered manually. Set to Auto if system calculated. Null if pre_processing_type is not Box_Cox", key:"" },
+      { name:"status", type:"VARCHAR(20)", desc:"Current state of the pre-processing job", req:"Yes", source:"System", logic:"Pending on insert. In Progress when Celery worker picks up. Completed when job finishes. Failed if job errors. Approved or Rejected after user reviews output", key:"" },
+      { name:"job_id", type:"VARCHAR(36)", desc:"Reference to the async Celery job that ran this pre-processing", req:"No", source:"SB_JOB_QUEUE_MASTER_TBL", logic:"Populated when Celery job is created. Links pre-processing record to job tracking", key:"FK" },
+      { name:"created_by", type:"VARCHAR(36)", desc:"User who triggered this pre-processing run", req:"Yes", source:"SB_USER_MASTER", logic:"From authenticated session token when user clicks Run Pre Processing", key:"FK" },
+      { name:"created_at", type:"TIMESTAMP", desc:"When this pre-processing run was initiated", req:"Yes", source:"System", logic:"Set to current timestamp at INSERT", key:"" },
+      { name:"updated_at", type:"TIMESTAMP", desc:"When this record was last updated — status changes update this", req:"Yes", source:"System", logic:"Set at INSERT. Updated when status changes (In Progress → Completed)", key:"" },
+    ],
+    decisions: [
+      "One row per pre-processing execution — user can run pre-processing multiple times",
+      "Latest completed pre-processing run is used by downstream modules",
+      "Thresholds stored per run — so different runs can have different threshold configs",
+      "pre_processing_type differentiates Remove Redundant Variables vs Box Cox vs Variable Identification",
+      "Status: Pending → In Progress → Completed → Approved/Rejected based on user review",
+      "sub_strategy_id NOT included — confirmed 16 June scrum. Only run_id and strategy_id",
+      "job_id links to SB_JOB_QUEUE_MASTER_TBL for async job tracking",
+      "Insert only — each new run creates a new row. Old runs preserved for audit",
+    ]
+  },
+  {
+    name: "SB_PRE_PROCESSING_VARIABLE_TBL",
+    module: "DFD 9",
+    desc: "One row per variable per pre-processing run. Stores the outcome — selected or rejected — and the reason for rejection. This is the feedback table that updates Variable Role.",
+    tag: null,
+    cols: [
+      { name:"pre_proc_variable_id", type:"VARCHAR(36)", desc:"Unique identifier for each variable outcome record", req:"Yes", source:"System", logic:"Auto-generated UUID on insert", key:"PK" },
+      { name:"pre_processing_id", type:"VARCHAR(36)", desc:"Which pre-processing run this outcome belongs to", req:"Yes", source:"SB_PRE_PROCESSING_MASTER_TBL", logic:"Taken from the parent pre-processing run record", key:"FK" },
+      { name:"run_id", type:"VARCHAR(36)", desc:"Denormalised for direct query without joining through pre_processing_id", req:"Yes", source:"SB_RUN_MASTER", logic:"Copied from pre_processing_id → SB_PRE_PROCESSING_MASTER_TBL.run_id", key:"FK" },
+      { name:"variable_role_id", type:"VARCHAR(36)", desc:"Reference to the variable role record for this variable in this run", req:"Yes", source:"SB_VARIABLE_ROLE_MASTER_TBL", logic:"Matched by variable name and run_id from Variable Role Master. Used to update primary_role when pre-processing rejects a variable", key:"FK" },
+      { name:"variable", type:"VARCHAR(255)", desc:"Column name of the variable — copied from Variable Role for traceability", req:"Yes", source:"SB_VARIABLE_ROLE_MASTER_TBL", logic:"Copied from variable_role_id → SB_VARIABLE_ROLE_MASTER_TBL.variable at insert time", key:"" },
+      { name:"outcome", type:"VARCHAR(20)", desc:"Whether this variable was selected or rejected by pre-processing", req:"Yes", source:"System", logic:"Selected = variable passed all thresholds. Rejected = variable failed at least one threshold. Manually_Selected = user moved from rejected to selected. Manually_Rejected = user moved from selected to rejected", key:"" },
+      { name:"rejection_reason", type:"VARCHAR(500)", desc:"Why the variable was rejected — system-generated or user-entered", req:"No", source:"System / Frontend", logic:"System: populated with which threshold failed e.g. Missing % 45% > threshold 10%. User: populated when user manually moves variable to Rejected using Add your reason for rejection here text box", key:"" },
+      { name:"rejection_source", type:"VARCHAR(20)", desc:"Whether rejection was automatic or manual", req:"No", source:"System", logic:"Algorithm = rejected by pre-processing thresholds automatically. Manual = rejected by user via Move to Rejected button", key:"" },
+      { name:"monitoring_flag", type:"BOOLEAN", desc:"Whether this variable was added to the Monitoring Table", req:"Yes", source:"Frontend", logic:"False by default. Set to True when user clicks Add for Monitoring button on this variable", key:"" },
+      { name:"created_at", type:"TIMESTAMP", desc:"When this variable outcome was recorded", req:"Yes", source:"System", logic:"Set to current timestamp when ETL writes pre-processing results", key:"" },
+      { name:"updated_at", type:"TIMESTAMP", desc:"When this outcome was last updated — manual moves update this", req:"Yes", source:"System", logic:"Updated when user manually moves variable between selected and rejected", key:"" },
+    ],
+    decisions: [
+      "One row per variable per pre-processing run",
+      "outcome field captures automatic AND manual outcomes",
+      "rejection_source distinguishes algorithm rejection from manual user rejection",
+      "monitoring_flag tracks Add for Monitoring button click per variable",
+      "When pre-processing completes — backend loops through results and updates SB_VARIABLE_ROLE_MASTER_TBL: set primary_role = Rejected for all rejected variables",
+      "This is the feedback loop from Pre-processing back to Variable Role",
+      "Insert on job completion. Update when user manually moves variables",
+    ]
+  },
+  {
+    name: "SB_PRE_PROCESSING_VARIABLE_IDENTIFICATION_TBL",
+    module: "DFD 9",
+    desc: "Stores Variable Identification configuration — Target Variable, Sample Weight Variable, Box Cox Lambda. One row per pre-processing run per identification type.",
+    tag: null,
+    cols: [
+      { name:"identification_id", type:"VARCHAR(36)", desc:"Unique identifier for each identification record", req:"Yes", source:"System", logic:"Auto-generated UUID on insert", key:"PK" },
+      { name:"pre_processing_id", type:"VARCHAR(36)", desc:"Which pre-processing run this identification belongs to", req:"Yes", source:"SB_PRE_PROCESSING_MASTER_TBL", logic:"From the parent pre-processing run", key:"FK" },
+      { name:"run_id", type:"VARCHAR(36)", desc:"Denormalised FK for direct query performance", req:"Yes", source:"SB_RUN_MASTER", logic:"Copied from pre_processing_id → SB_PRE_PROCESSING_MASTER_TBL.run_id", key:"FK" },
+      { name:"identification_type", type:"VARCHAR(30)", desc:"Which Variable Identification sub-tab this record covers", req:"Yes", source:"System", logic:"Values: Target_Variable / Sample_Weight / Box_Cox_Transformation", key:"" },
+      { name:"method", type:"VARCHAR(20)", desc:"How the variable was identified — from existing data or newly coded", req:"Yes", source:"Frontend", logic:"Select_From_Data = user selected from dropdown. Code_New = user wrote Python code", key:"" },
+      { name:"variable_name", type:"VARCHAR(255)", desc:"Name of the identified variable — for Select from Data method", req:"No", source:"Frontend", logic:"Populated when method = Select_From_Data. User selects from dropdown. Null when method = Code_New", key:"" },
+      { name:"python_code", type:"TEXT", desc:"Python code defining the variable — for Code New method", req:"No", source:"Frontend", logic:"Populated when method = Code_New. Uses def target_main(df) pattern. Null when method = Select_From_Data", key:"" },
+      { name:"lambda_value", type:"DECIMAL", desc:"Lambda value for Box Cox transformation — for Box Cox identification type only", req:"No", source:"Frontend", logic:"Populated only when identification_type = Box_Cox_Transformation. User enters or selects Auto", key:"" },
+      { name:"lambda_method", type:"VARCHAR(10)", desc:"Input or Auto for Box Cox lambda", req:"No", source:"Frontend", logic:"Input = user entered lambda manually. Auto = system calculated optimal lambda. Null for non-Box-Cox types", key:"" },
+      { name:"created_by", type:"VARCHAR(36)", desc:"User who saved this identification", req:"Yes", source:"SB_USER_MASTER", logic:"From session token when user clicks Save Metadata", key:"FK" },
+      { name:"created_at", type:"TIMESTAMP", desc:"When this identification was saved", req:"Yes", source:"System", logic:"Set when user clicks Save Metadata button", key:"" },
+    ],
+    decisions: [
+      "Separate table from Pre-processing Master — identification config is independent from threshold config",
+      "Save Metadata button on Variable Identification screen triggers insert into this table",
+      "Three identification types — one row per type per pre-processing run",
+      "python_code stored as TEXT — full code preserved for audit and reproducibility",
+      "Quick Setup can copy these rows to new run for Variable Identification carry-forward",
+      "No updated_at — insert only. If user changes identification they create a new row",
+    ]
+  },
+  {
+    name: "SB_PRE_PROCESSING_MONITORING_TBL",
+    module: "DFD 9 — Monitoring Table",
+    desc: "Variables flagged for monitoring by user. Shown in Monitoring Table modal. One row per variable added for monitoring per pre-processing run.",
+    tag: null,
+    cols: [
+      { name:"monitoring_id", type:"VARCHAR(36)", desc:"Unique identifier for each monitoring entry", req:"Yes", source:"System", logic:"Auto-generated UUID on insert", key:"PK" },
+      { name:"pre_processing_id", type:"VARCHAR(36)", desc:"Which pre-processing run this monitoring entry belongs to", req:"Yes", source:"SB_PRE_PROCESSING_MASTER_TBL", logic:"From parent pre-processing run", key:"FK" },
+      { name:"run_id", type:"VARCHAR(36)", desc:"Denormalised FK", req:"Yes", source:"SB_RUN_MASTER", logic:"Copied from pre_processing_id", key:"FK" },
+      { name:"data_id", type:"VARCHAR(36)", desc:"Which dataset this monitoring entry relates to — shown on Monitoring Table as Data ID column", req:"Yes", source:"SB_DATA_MASTER_TBL", logic:"From the active data_id for this pre-processing run. Seen as 1000728 on screen", key:"FK" },
+      { name:"feature_selection_run_id", type:"VARCHAR(36)", desc:"Feature selection run identifier — shown on Monitoring Table modal as Feature Selection Run ID", req:"Yes", source:"System", logic:"Auto-generated or system-assigned ID for the feature selection job. Seen as 1001438, 1001441, 1001445 on screen", key:"" },
+      { name:"variable", type:"VARCHAR(255)", desc:"Variable name added for monitoring", req:"Yes", source:"SB_PRE_PROCESSING_VARIABLE_TBL", logic:"Variable name from the pre-processing variable outcome record", key:"" },
+      { name:"input_params", type:"VARCHAR(255)", desc:"Input parameters used for this feature selection run — shown on Monitoring Table", req:"Yes", source:"System", logic:"Comma-separated list of algorithms used. Seen as GBM,IV,LR,RF on screen", key:"" },
+      { name:"flag", type:"VARCHAR(50)", desc:"Monitoring flag category — shown as Flag column on Monitoring Table", req:"Yes", source:"System", logic:"Seen as BEHAVIOUR on screen. Pending Deepu clarification on all valid flag values", key:"" },
+      { name:"is_deleted", type:"BOOLEAN", desc:"Whether this monitoring entry has been deleted by user", req:"Yes", source:"System", logic:"False on insert. Set to True when user clicks Delete on Monitoring Table. Soft delete for audit trail", key:"" },
+      { name:"created_by", type:"VARCHAR(36)", desc:"User who added this variable for monitoring", req:"Yes", source:"SB_USER_MASTER", logic:"From session token when user clicks Add for Monitoring button", key:"FK" },
+      { name:"created_at", type:"TIMESTAMP", desc:"When this monitoring entry was created", req:"Yes", source:"System", logic:"Set when user clicks Add for Monitoring", key:"" },
+    ],
+    decisions: [
+      "One row per variable added to Monitoring Table per pre-processing run",
+      "Soft delete — is_deleted = true when user clicks Delete. Row retained for audit",
+      "feature_selection_run_id corresponds to the IDs visible on Monitoring Table screen (1001438 etc.)",
+      "input_params stores the algorithm combination used — GBM,IV,LR,RF visible on screen",
+      "Monitoring Table shows only is_deleted = false rows",
+      "04 of 25 selected shown on screen — is_deleted handles removed entries",
+    ]
+  },
+];
+
+const RELATIONSHIPS = [
+  { from:"SB_RUN_MASTER", to:"SB_PRE_PROCESSING_MASTER_TBL", card:"||--o{", label:"runs-pre-processing", note:"One run can have multiple pre-processing executions. Latest completed one feeds downstream." },
+  { from:"SB_PRE_PROCESSING_MASTER_TBL", to:"SB_PRE_PROCESSING_VARIABLE_TBL", card:"||--o{", label:"produces-variable-outcomes", note:"One pre-processing run produces one outcome row per variable in the dataset." },
+  { from:"SB_PRE_PROCESSING_MASTER_TBL", to:"SB_PRE_PROCESSING_VARIABLE_IDENTIFICATION_TBL", card:"||--o{", label:"has-identification-config", note:"One pre-processing run can have up to 3 identification rows — Target, Sample Weight, Box Cox." },
+  { from:"SB_PRE_PROCESSING_MASTER_TBL", to:"SB_PRE_PROCESSING_MONITORING_TBL", card:"||--o{", label:"has-monitoring-entries", note:"Variables added for monitoring during a pre-processing review." },
+  { from:"SB_VARIABLE_ROLE_MASTER_TBL", to:"SB_PRE_PROCESSING_VARIABLE_TBL", card:"||--o{", label:"updated-by-pre-processing", note:"Pre-processing variable outcome feeds back into Variable Role — sets primary_role = Rejected for failed variables." },
+  { from:"SB_DATA_MASTER_TBL", to:"SB_PRE_PROCESSING_MASTER_TBL", card:"||--o{", label:"data-used-in", note:"Pre-processing runs against a specific validated dataset." },
+  { from:"SB_JOB_QUEUE_MASTER_TBL", to:"SB_PRE_PROCESSING_MASTER_TBL", card:"||--||", label:"executes", note:"Each pre-processing run has one async Celery job tracking it." },
+];
+
+const MERMAID = `erDiagram
+  SB_PRE_PROCESSING_MASTER_TBL {
+    string pre_processing_id PK
+    string run_id FK
+    string strategy_id FK
+    string data_id FK
+    string pre_processing_type
+    string flag
+    decimal cov_threshold
+    decimal missing_pct_threshold
+    int categories_max_threshold
+    int categories_min_threshold
+    decimal iv_threshold
+    decimal lambda_value
+    string lambda_method
+    string status
+    string job_id FK
+    string created_by FK
+    datetime created_at
+    datetime updated_at
+  }
+  SB_PRE_PROCESSING_VARIABLE_TBL {
+    string pre_proc_variable_id PK
+    string pre_processing_id FK
+    string run_id FK
+    string variable_role_id FK
+    string variable
+    string outcome
+    string rejection_reason
+    string rejection_source
+    boolean monitoring_flag
+    datetime created_at
+    datetime updated_at
+  }
+  SB_PRE_PROCESSING_VARIABLE_IDENTIFICATION_TBL {
+    string identification_id PK
+    string pre_processing_id FK
+    string run_id FK
+    string identification_type
+    string method
+    string variable_name
+    text python_code
+    decimal lambda_value
+    string lambda_method
+    string created_by FK
+    datetime created_at
+  }
+  SB_PRE_PROCESSING_MONITORING_TBL {
+    string monitoring_id PK
+    string pre_processing_id FK
+    string run_id FK
+    string data_id FK
+    string feature_selection_run_id
+    string variable
+    string input_params
+    string flag
+    boolean is_deleted
+    string created_by FK
+    datetime created_at
+  }
+  SB_RUN_MASTER ||--o{ SB_PRE_PROCESSING_MASTER_TBL : runs-pre-processing
+  SB_PRE_PROCESSING_MASTER_TBL ||--o{ SB_PRE_PROCESSING_VARIABLE_TBL : produces-variable-outcomes
+  SB_PRE_PROCESSING_MASTER_TBL ||--o{ SB_PRE_PROCESSING_VARIABLE_IDENTIFICATION_TBL : has-identification-config
+  SB_PRE_PROCESSING_MASTER_TBL ||--o{ SB_PRE_PROCESSING_MONITORING_TBL : has-monitoring-entries
+  SB_VARIABLE_ROLE_MASTER_TBL ||--o{ SB_PRE_PROCESSING_VARIABLE_TBL : updated-by
+  SB_DATA_MASTER_TBL ||--o{ SB_PRE_PROCESSING_MASTER_TBL : data-used-in
+  SB_JOB_QUEUE_MASTER_TBL ||--|| SB_PRE_PROCESSING_MASTER_TBL : executes`;
+
+// ── Components ─────────────────────────────────────────────────────────────
+const TableCard = ({ table }) => {
+  const [expanded, setExpanded] = useState(true);
+  const [showDecisions, setShowDecisions] = useState(false);
+  const hdrs = ["Column Name","Data Type","Description","Required","Source","Source Column Logic","Key"];
+  return (
+    <div style={{ border:"1px solid #dee2e6", borderRadius:8, overflow:"hidden", marginBottom:16, boxShadow:"0 1px 6px rgba(0,0,0,0.07)" }}>
+      <div onClick={() => setExpanded(!expanded)} style={{ background:"#f8f9fa", padding:"12px 16px", cursor:"pointer", display:"flex", alignItems:"center", gap:10, borderBottom: expanded ? "1px solid #dee2e6" : "none" }}>
+        <div style={{ flex:1 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4 }}>
+            <span style={{ fontSize:13, fontWeight:700, color:"#d9534f", fontFamily:"monospace" }}>{table.name}</span>
+            <span style={{ fontSize:10, color:"#6c757d", padding:"2px 8px", background:"white", borderRadius:4, border:"1px solid #dee2e6" }}>{table.module}</span>
+            <span style={{ fontSize:10, color:"#6c757d" }}>{table.cols.length} columns</span>
+          </div>
+          <div style={{ fontSize:11, color:"#6c757d", fontStyle:"italic" }}>{table.desc}</div>
+        </div>
+        <span style={{ fontSize:12, color:"#aaa" }}>{expanded?"▲":"▼"}</span>
+      </div>
+      {expanded && (
+        <div style={{ overflowX:"auto" }}>
+          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:11, minWidth:900 }}>
+            <thead>
+              <tr style={{ background:"#2c3e50" }}>
+                {hdrs.map((h,i) => <th key={i} style={{ padding:"8px 12px", textAlign:"left", fontWeight:600, color:"white", fontSize:10, whiteSpace:"nowrap", borderRight:"1px solid #3d5166" }}>{h}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {table.cols.map((col,i) => (
+                <tr key={i} style={{ background: i%2===0 ? "white" : "#f8f9fa", borderTop:"1px solid #f1f3f5" }}>
+                  <td style={{ padding:"7px 12px", fontFamily:"monospace", fontWeight:700, color: col.key==="PK"?"#d9534f":col.key.includes("FK")?"#27ae60":"#333", whiteSpace:"nowrap", borderRight:"1px solid #f1f3f5" }}>{col.name}</td>
+                  <td style={{ padding:"7px 12px", fontFamily:"monospace", color:"#6c757d", whiteSpace:"nowrap", borderRight:"1px solid #f1f3f5" }}>{col.type}</td>
+                  <td style={{ padding:"7px 12px", color:"#333", borderRight:"1px solid #f1f3f5", minWidth:180 }}>{col.desc}</td>
+                  <td style={{ padding:"7px 12px", textAlign:"center", whiteSpace:"nowrap", borderRight:"1px solid #f1f3f5" }}>
+                    <span style={{ fontSize:9, fontWeight:700, padding:"2px 7px", borderRadius:4, background:col.req==="Yes"?"#f8d7da":"#e2e3e5", color:col.req==="Yes"?"#721c24":"#383d41" }}>{col.req}</span>
+                  </td>
+                  <td style={{ padding:"7px 12px", fontFamily:"monospace", fontSize:10, fontWeight:600, color: col.source==="System"?"#2980b9":col.source==="Frontend"?"#8e44ad":col.source.includes("SB_")?"#27ae60":"#e67e22", whiteSpace:"nowrap", borderRight:"1px solid #f1f3f5" }}>{col.source}</td>
+                  <td style={{ padding:"7px 12px", color:"#555", fontStyle:"italic", fontSize:10, borderRight:"1px solid #f1f3f5", minWidth:260 }}>{col.logic}</td>
+                  <td style={{ padding:"7px 12px", textAlign:"center", whiteSpace:"nowrap" }}>
+                    {col.key && <span style={{ fontSize:9, fontWeight:700, padding:"2px 7px", borderRadius:4, background:col.key==="PK"?"#f8d7da":col.key.includes("FK")?"#d4edda":"#e2e3e5", color:col.key==="PK"?"#721c24":col.key.includes("FK")?"#155724":"#383d41" }}>{col.key}</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ borderTop:"1px solid #f1f3f5" }}>
+            <div onClick={() => setShowDecisions(!showDecisions)} style={{ padding:"8px 14px", cursor:"pointer", display:"flex", alignItems:"center", gap:8, background:"#fafafa", fontSize:11, color:"#495057" }}>
+              <span style={{ color:"#27ae60", fontWeight:700 }}>📋</span>
+              <span style={{ fontWeight:600 }}>Design Decisions ({table.decisions.length})</span>
+              <span style={{ color:"#aaa", marginLeft:"auto" }}>{showDecisions?"▲":"▼"}</span>
+            </div>
+            {showDecisions && (
+              <div style={{ padding:"10px 14px", background:"#f8fff8", borderTop:"1px solid #d4edda" }}>
+                {table.decisions.map((d,i) => (
+                  <div key={i} style={{ display:"flex", gap:8, marginBottom:6, fontSize:11, color:"#333" }}>
+                    <span style={{ color:"#27ae60", flexShrink:0 }}>✓</span><span>{d}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const MermaidBlock = ({ code }) => {
+  const [copied, setCopied] = useState(false);
+  const copy = () => { navigator.clipboard.writeText("```mermaid\n"+code+"\n```"); setCopied(true); setTimeout(()=>setCopied(false),2000); };
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
+        <span style={{ fontSize:11, letterSpacing:3, color:"#888", textTransform:"uppercase" }}>Mermaid Code — paste into VS Code</span>
+        <button onClick={copy} style={{ padding:"4px 12px", border:"1px solid #dee2e6", borderRadius:4, background:copied?"#d4edda":"white", color:copied?"#155724":"#495057", fontSize:11, cursor:"pointer" }}>{copied?"✓ Copied!":"Copy"}</button>
+      </div>
+      <pre style={{ background:"#1e1e1e", color:"#d4d4d4", padding:16, borderRadius:8, fontSize:10, overflow:"auto", lineHeight:1.6, fontFamily:"monospace", maxHeight:400 }}>{"```mermaid\n"+code+"\n```"}</pre>
+    </div>
+  );
+};
+
+export default function PreProcessingER() {
+  const [activeTab, setActiveTab] = useState("tables");
+  return (
+    <div style={{ minHeight:"100vh", background:"#f0f2f5", fontFamily:"Georgia, serif", padding:24 }}>
+      <div style={{ marginBottom:16 }}>
+        <div style={{ fontSize:10, letterSpacing:5, color:"#888", textTransform:"uppercase", marginBottom:6 }}>HSBC · Stratobot · Module 4</div>
+        <h1 style={{ fontSize:22, fontWeight:400, margin:0, color:"#1a1a2e" }}>ER Diagram — Pre-processing Module</h1>
+        <p style={{ color:"#888", marginTop:6, fontSize:12, fontStyle:"italic" }}>Based on Figma screens and DFD reviewed in 16 June session · 4 tables</p>
+      </div>
+
+      {/* Screen observations */}
+      <div style={{ background:"#e8f4fb", border:"1px solid #2980b9", borderRadius:8, padding:"12px 16px", marginBottom:12, fontSize:11, color:"#1a5276" }}>
+        <div style={{ fontWeight:700, marginBottom:8 }}>📸 Key observations from Figma screens:</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))", gap:6 }}>
+          {[
+            "Remove Redundant Variables — 5 configurable thresholds: COV, Missing %, Categories max, Categories min, IV",
+            "Variable Identification — 3 sub-tabs: Identify Target Variable, Sample Weight Variable, Box Cox Transformation",
+            "Target Variable — Select from Data or Code New (Python editor). Save Metadata button",
+            "Box Cox — Lambda: Input or Auto. Apply button",
+            "Pre-processing Master Output — Split view: Selected Variables (left) vs Rejected Variables (right)",
+            "Move to Rejected button — shows Add your reason for rejection here text input",
+            "Add for Monitoring button — adds variable to Monitoring Table",
+            "Monitoring Table modal — Feature Selection Run ID, Data ID, Input Params (GBM,IV,LR,RF), Flag (BEHAVIOUR)",
+            "EDA disabled until pre-processing completes — tooltip confirms this navigation rule",
+            "Pre-processing Master list — shows pre_process_id, Flag, Type (Normal/Box Cox), Input Params, View link",
+            "Transformed Output 1-5 visible — Approved/Rejected/Add/Remove actions per output",
+          ].map((o,i) => <div key={i} style={{ display:"flex", gap:6 }}><span>→</span><span>{o}</span></div>)}
+        </div>
+      </div>
+
+      {/* Corrections to Abhimanyu DFD */}
+      <div style={{ background:"#f8d7da", border:"1px solid #f5c6cb", borderRadius:8, padding:"12px 16px", marginBottom:12, fontSize:11, color:"#721c24" }}>
+        <div style={{ fontWeight:700, marginBottom:8 }}>⚠ Corrections needed in Abhimanyu's DFD 9:</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))", gap:6 }}>
+          {[
+            "sub_strategy_id FK shown — REMOVE. Confirmed in 16 June scrum: sub_strategy_id only in Run Master",
+            "SB_METADATA_MASTER_TBL FK shown — REMOVE. Metadata Master deleted, replaced by Variable Role Master",
+            "project_id used instead of strategy_id — rename to strategy_id throughout",
+            "Two parallel Pre-processing Service circles — should be one async flow with completion callback",
+            "API circle missing — align with Ishan's DFD notation (must show API circle between frontend and backend)",
+            "SB_PRE_PROCESSING_VARIABLE_TBL missing — feedback loop table not shown. Add this as second target table",
+          ].map((c,i) => <div key={i} style={{ display:"flex", gap:6 }}><span>✗</span><span>{c}</span></div>)}
+        </div>
+      </div>
+
+      {/* Decisions */}
+      <div style={{ background:"#d4edda", border:"1px solid #c3e6cb", borderRadius:8, padding:"12px 16px", marginBottom:16, fontSize:11, color:"#155724" }}>
+        <div style={{ fontWeight:700, marginBottom:8 }}>✓ Key design decisions applied:</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))", gap:6 }}>
+          {[
+            "4 tables for pre-processing — Master, Variable Outcomes, Variable Identification, Monitoring",
+            "sub_strategy_id excluded everywhere — only run_id and strategy_id per 16 June decision",
+            "SB_METADATA_MASTER_TBL removed — Variable Identification now stored in its own table",
+            "Feedback loop: pre-processing rejects update primary_role = Rejected in Variable Role Master",
+            "Soft delete in Monitoring Table — is_deleted rather than hard delete",
+            "rejection_reason stored per variable — supports Add your reason for rejection screen feature",
+            "Monitoring Table data matches screen: feature_selection_run_id, data_id, input_params, flag",
+            "Python code stored as TEXT for Code New method — full audit and reproducibility",
+          ].map((d,i) => <div key={i} style={{ display:"flex", gap:6 }}><span>✓</span><span>{d}</span></div>)}
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display:"flex", gap:4, marginBottom:0 }}>
+        {[{key:"tables",label:"Tables & Columns"},{key:"relationships",label:"Relationships"},{key:"flow",label:"Data Flow"},{key:"mermaid",label:"Mermaid Code"}].map(t => (
+          <button key={t.key} onClick={() => setActiveTab(t.key)} style={{ padding:"9px 18px", border:"none", borderRadius:"8px 8px 0 0", background:activeTab===t.key?"white":"#dde1e7", color:activeTab===t.key?"#e74c3c":"#666", fontWeight:activeTab===t.key?"700":"400", fontSize:12, cursor:"pointer", borderBottom:activeTab===t.key?"3px solid #e74c3c":"none" }}>{t.label}</button>
+        ))}
+      </div>
+
+      <div style={{ background:"white", borderRadius:"0 8px 8px 8px", padding:24, boxShadow:"0 2px 12px rgba(0,0,0,0.08)", borderTop:"3px solid #e74c3c" }}>
+        {activeTab==="tables" && (
+          <div>
+            <div style={{ fontSize:11, letterSpacing:3, color:"#888", textTransform:"uppercase", marginBottom:16 }}>4 Tables — Module 4 Pre-processing</div>
+            {TABLES.map((t,i) => <TableCard key={i} table={t} />)}
+          </div>
+        )}
+
+        {activeTab==="relationships" && (
+          <div>
+            <div style={{ fontSize:11, letterSpacing:3, color:"#888", textTransform:"uppercase", marginBottom:16 }}>Relationships</div>
+            {RELATIONSHIPS.map((r,i) => (
+              <div key={i} style={{ padding:"12px 16px", marginBottom:10, background:"#f8f9fa", borderRadius:8, border:"1px solid #dee2e6" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6, flexWrap:"wrap" }}>
+                  <span style={{ fontFamily:"monospace", fontWeight:700, color:"#d9534f", fontSize:11 }}>{r.from}</span>
+                  <span style={{ color:"#6c757d", fontFamily:"monospace" }}>{r.card}</span>
+                  <span style={{ fontFamily:"monospace", fontWeight:700, color:"#27ae60", fontSize:11 }}>{r.to}</span>
+                  <span style={{ fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:4, background:"#fde8e8", color:"#c0392b" }}>: {r.label}</span>
+                </div>
+                <div style={{ fontSize:11, color:"#6c757d", fontStyle:"italic" }}>{r.note}</div>
+              </div>
+            ))}
+
+            {/* Feedback loop note */}
+            <div style={{ marginTop:20, background:"#fff3cd", border:"1px solid #f0ad4e", borderRadius:8, padding:"14px 16px", fontSize:11, color:"#856404" }}>
+              <div style={{ fontWeight:700, marginBottom:8 }}>⚠ Critical: Pre-processing Feedback Loop to Variable Role</div>
+              <p style={{ margin:"0 0 8px 0" }}>When pre-processing job completes the backend must perform this update:</p>
+              <pre style={{ background:"#1e1e1e", color:"#d4d4d4", padding:12, borderRadius:6, fontSize:10, margin:0 }}>
+{`-- Step 1: Insert variable outcomes into Pre-processing Variable table
+INSERT INTO SB_PRE_PROCESSING_VARIABLE_TBL (outcome = 'Rejected' for failed variables)
+
+-- Step 2: Update Variable Role Master for rejected variables
+UPDATE SB_VARIABLE_ROLE_MASTER_TBL
+SET primary_role = 'Rejected',
+    updated_at = CURRENT_TIMESTAMP
+WHERE run_id = :run_id
+AND variable IN (
+    SELECT variable FROM SB_PRE_PROCESSING_VARIABLE_TBL
+    WHERE pre_processing_id = :pre_processing_id
+    AND outcome IN ('Rejected', 'Manually_Rejected')
+)
+
+-- Step 3: Update Run Module Status
+UPDATE SB_RUN_MODULE_STATUS
+SET module_status = 'Completed',
+    latest_output_id = :pre_processing_id,
+    latest_output_table = 'SB_PRE_PROCESSING_MASTER_TBL',
+    completed_at = CURRENT_TIMESTAMP
+WHERE run_id = :run_id
+AND module_name = 'PREPROCESSING'`}
+              </pre>
+            </div>
+          </div>
+        )}
+
+        {activeTab==="flow" && (
+          <div>
+            <div style={{ fontSize:11, letterSpacing:3, color:"#888", textTransform:"uppercase", marginBottom:16 }}>Pre-processing Data Flow — Two Sections</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:20 }}>
+              {[
+                {
+                  title:"Section 1 — Remove Redundant Variables",
+                  color:"#2980b9", steps:[
+                    "User configures 5 thresholds (COV, Missing %, Categories max/min, IV) on Run Pre-processing screen",
+                    "User clicks Run Pre Processing button",
+                    "Backend inserts row into SB_PRE_PROCESSING_MASTER_TBL (status = Pending)",
+                    "Celery job created in SB_JOB_QUEUE_MASTER_TBL",
+                    "Algorithm evaluates every Input variable against all 5 thresholds",
+                    "Job completes — backend inserts one row per variable into SB_PRE_PROCESSING_VARIABLE_TBL",
+                    "Backend updates SB_VARIABLE_ROLE_MASTER_TBL: sets primary_role = Rejected for failed variables",
+                    "User sees Selected/Rejected split view on Pre-processing Master Output tab",
+                    "User can manually move variables using Move to Rejected/Selected buttons",
+                    "User can add reason when manually rejecting a variable",
+                    "User clicks Save — manual moves persisted in SB_PRE_PROCESSING_VARIABLE_TBL",
+                    "SB_RUN_MODULE_STATUS updated: PREPROCESSING = Completed",
+                    "EDA navigation link becomes enabled",
+                  ]
+                },
+                {
+                  title:"Section 2 — Variable Identification",
+                  color:"#8e44ad", steps:[
+                    "User clicks Variable Identification tab on Run Pre-processing screen",
+                    "Sub-tab 1: Identify Target Variable — user selects from dropdown or writes Python code",
+                    "User clicks Save Metadata → row inserted into SB_PRE_PROCESSING_VARIABLE_IDENTIFICATION_TBL (type = Target_Variable)",
+                    "Sub-tab 2: Sample Weight Variable — user selects from dropdown or Code New",
+                    "User clicks Save Metadata → row inserted (type = Sample_Weight)",
+                    "Sub-tab 3: Box Cox Transformation — user sets Lambda value (Input or Auto)",
+                    "User clicks Apply → row inserted (type = Box_Cox_Transformation)",
+                    "All 3 identification types can be saved independently",
+                    "Add for Monitoring button → row inserted into SB_PRE_PROCESSING_MONITORING_TBL",
+                    "View Monitoring Table → reads SB_PRE_PROCESSING_MONITORING_TBL where is_deleted = false",
+                    "Delete on Monitoring Table → sets is_deleted = true (soft delete)",
+                  ]
+                }
+              ].map((s,i) => (
+                <div key={i} style={{ background:"#f8f9fa", border:`2px solid ${s.color}33`, borderRadius:8, overflow:"hidden" }}>
+                  <div style={{ background:s.color, padding:"10px 14px" }}>
+                    <span style={{ fontSize:12, fontWeight:700, color:"white" }}>{s.title}</span>
+                  </div>
+                  <div style={{ padding:"12px 14px" }}>
+                    {s.steps.map((step,j) => (
+                      <div key={j} style={{ display:"flex", gap:8, marginBottom:8, fontSize:11 }}>
+                        <span style={{ background:s.color, color:"white", borderRadius:"50%", width:18, height:18, display:"flex", alignItems:"center", justifyContent:"center", fontSize:9, fontWeight:700, flexShrink:0 }}>{j+1}</span>
+                        <span style={{ color:"#333" }}>{step}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Questions pending */}
+            <div style={{ background:"#fff8f8", border:"1px solid #f5c6cb", borderRadius:8, padding:"12px 16px", fontSize:11 }}>
+              <div style={{ fontWeight:700, color:"#721c24", marginBottom:8 }}>❓ Questions to raise with Deepu / Aparna</div>
+              {[
+                { q:"What does the Flag column mean?", detail:"Monitoring Table shows BEHAVIOUR as the flag. What other flag values exist and what do they mean?" },
+                { q:"What are input_params?", detail:"Monitoring Table shows GBM,IV,LR,RF. Are these the algorithms used for feature selection? Who configures them — user or system?" },
+                { q:"What are Feature Selection Run IDs?", detail:"Screen shows 1001438, 1001441, 1001445. These look like separate feature selection job IDs. Are these from a separate feature selection algorithm?" },
+                { q:"What are Transformed Outputs 1-5?", detail:"Image 3 shows Transformed Output 1 through 5 with View/Approved/Rejected/Add/Remove options. What are these — outputs of Box Cox transformation?" },
+                { q:"Can pre-processing run multiple times per run?", detail:"If user is unhappy with results — can they change thresholds and run again? If yes — does latest run override previous?" },
+              ].map((item,i) => (
+                <div key={i} style={{ background:"white", border:"1px solid #dee2e6", borderRadius:6, padding:"10px 12px", marginBottom:8 }}>
+                  <div style={{ fontWeight:700, color:"#721c24", marginBottom:4 }}>❓ {item.q}</div>
+                  <div style={{ color:"#555" }}>{item.detail}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab==="mermaid" && <MermaidBlock code={MERMAID} />}
+      </div>
+
+      {/* Summary */}
+      <div style={{ marginTop:20, background:"white", border:"1px solid #dee2e6", borderRadius:8, padding:"14px 20px" }}>
+        <div style={{ fontSize:11, letterSpacing:3, color:"#888", textTransform:"uppercase", marginBottom:10 }}>Summary — All 4 Tables</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))", gap:10 }}>
+          {TABLES.map((t,i) => (
+            <div key={i} style={{ padding:"10px 14px", background:"#f8f9fa", border:"1px solid #dee2e6", borderRadius:8 }}>
+              <div style={{ fontSize:10, fontWeight:700, color:"#d9534f", fontFamily:"monospace", marginBottom:4 }}>{t.name}</div>
+              <div style={{ fontSize:10, color:"#888", display:"grid", gridTemplateColumns:"1fr 1fr", gap:2 }}>
+                <span>Columns: <b style={{ color:"#333" }}>{t.cols.length}</b></span>
+                <span>PKs: <b style={{ color:"#d9534f" }}>{t.cols.filter(c=>c.key==="PK").length}</b></span>
+                <span>FKs: <b style={{ color:"#27ae60" }}>{t.cols.filter(c=>c.key.includes("FK")).length}</b></span>
+                <span>Required: <b style={{ color:"#333" }}>{t.cols.filter(c=>c.req==="Yes").length}</b></span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
