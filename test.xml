@@ -1,0 +1,126 @@
+<changeSet id="002-create-procedure-sb-strategy-mstr" author="Liquibase" failOnError="true" runOnChange="true" labels="initialDevelopment">
+        <comment>
+            Atomic create-strategy function. Handles the FIRST-TIME strategy creation flow only, seeding four
+            tables in FK order within a single transaction:
+              sb_strategy_mstr -> sb_sub_strategy_mstr -> sb_run_mstr -> sb_access_mstr
+            If any insert fails, the whole operation rolls back (no partial strategy).
+
+            Returns a JSONB object with the three generated IDs the service layer needs to drive the next
+            screens: { "strategy_id": <bigint>, "sub_strategy_id": <bigint>, "run_id": <bigint> }.
+            (strategy_id for the strategy screen; run_id drives all downstream module screens; sub_strategy_id
+            included for completeness / grouping.)
+
+            NOT handled here (by design -- handled in the service layer or later steps):
+              - Data / File master entries: created later at the data-upload step, NOT at strategy creation.
+              - "New run under existing strategy/sub-strategy": a separate, single-table operation (plain SQL
+                in the repository), NOT this function.
+              - Edit / add-member / remove-member / role-change / delete: separate operations (see their own
+                changesets).
+
+            Sub-strategy name: uses the user-entered name if provided, otherwise falls back to a default
+            derived from the strategy name.
+        </comment>
+        <sql splitStatements="false" stripComments="true">
+            <![CDATA[
+                CREATE OR REPLACE FUNCTION create_and_return_strategy(
+                    p_strategy_name VARCHAR(100),
+                    p_description VARCHAR(500),
+                    p_entity VARCHAR(20),
+                    p_product VARCHAR(50),
+                    p_function VARCHAR(100),
+                    p_region VARCHAR(50),
+                    p_owner VARCHAR(50),
+                    p_analysts JSONB,
+                    p_reviewers JSONB,
+                    p_status VARCHAR(20),
+                    p_created_by VARCHAR(50),
+                    p_sub_strategy_name VARCHAR(100)
+                )
+                RETURNS JSONB
+                LANGUAGE plpgsql
+                AS $$
+                DECLARE
+                    v_strategy_id BIGINT;
+                    v_sub_strategy_id BIGINT;
+                    v_run_id BIGINT;
+                    v_sub_strategy_name VARCHAR(100);
+                BEGIN
+                    ------------------------------------------------------------------
+                    -- 1. STRATEGY (primary table) -- id auto-generated
+                    ------------------------------------------------------------------
+                    INSERT INTO sb_strategy_mstr (
+                        strategy_name, description, entity, product, function, region, owner,
+                        analysts, reviewers, status, created_by, updated_by, created_at, updated_at
+                    )
+                    VALUES (
+                        p_strategy_name, p_description, p_entity, p_product, p_function, p_region, p_owner,
+                        p_analysts, p_reviewers, p_status, p_created_by, p_created_by,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    RETURNING strategy_id INTO v_strategy_id;
+
+                    ------------------------------------------------------------------
+                    -- 2. SUB-STRATEGY -- user-entered name if provided, else default
+                    ------------------------------------------------------------------
+                    v_sub_strategy_name := COALESCE(
+                        NULLIF(TRIM(p_sub_strategy_name), ''),
+                        LEFT(COALESCE(NULLIF(TRIM(p_strategy_name), ''), 'Default Strategy') || ' - Default', 100)
+                    );
+
+                    INSERT INTO sb_sub_strategy_mstr (
+                        strategy_id, sub_strategy_name, description, created_by, updated_by, created_at, updated_at
+                    )
+                    VALUES (
+                        v_strategy_id, v_sub_strategy_name, NULL, p_created_by, p_created_by,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    RETURNING sub_strategy_id INTO v_sub_strategy_id;
+
+                    ------------------------------------------------------------------
+                    -- 3. RUN -- default run in Draft status for this strategy + sub-strategy
+                    ------------------------------------------------------------------
+                    INSERT INTO sb_run_mstr (
+                        strategy_id, sub_strategy_id, run_name, status, module_name, module_status,
+                        setup_type, created_by, updated_by, created_at, updated_at
+                    )
+                    VALUES (
+                        v_strategy_id, v_sub_strategy_id, NULL, 'Draft', 'Data', 'Draft',
+                        'Manual', p_created_by, p_created_by, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    RETURNING run_id INTO v_run_id;
+
+                    ------------------------------------------------------------------
+                    -- 4. ACCESS -- grant owner + analysts + reviewers their roles.
+                    --    No id needed back; fire-and-forget within the same transaction.
+                    ------------------------------------------------------------------
+                    INSERT INTO sb_access_mstr (
+                        strategy_id, user_id, role, granted_by, granted_at, revoked_at, revoked_by
+                    )
+                    SELECT DISTINCT v_strategy_id, desired.user_id, desired.role,
+                           p_created_by, CURRENT_TIMESTAMP, NULL, NULL
+                    FROM (
+                        SELECT TRIM(p_owner) AS user_id, 'OWNER'::VARCHAR(30) AS role
+                        WHERE p_owner IS NOT NULL AND TRIM(p_owner) <> ''
+                        UNION ALL
+                        SELECT TRIM(value), 'ANALYST'::VARCHAR(30)
+                        FROM jsonb_array_elements_text(COALESCE(p_analysts, '[]'::jsonb))
+                        WHERE TRIM(value) <> ''
+                        UNION ALL
+                        SELECT TRIM(value), 'REVIEWER'::VARCHAR(30)
+                        FROM jsonb_array_elements_text(COALESCE(p_reviewers, '[]'::jsonb))
+                        WHERE TRIM(value) <> ''
+                    ) desired;
+
+                    ------------------------------------------------------------------
+                    -- 5. RETURN the three generated IDs as JSONB
+                    ------------------------------------------------------------------
+                    RETURN jsonb_build_object(
+                        'strategy_id', v_strategy_id,
+                        'sub_strategy_id', v_sub_strategy_id,
+                        'run_id', v_run_id
+                    );
+                END;
+                $$;
+            ]]>
+        </sql>
+    </changeSet>
